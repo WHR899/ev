@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>THE PINK COLLECTION</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: 'Helvetica Neue', sans-serif; }
+        
+        /* UI Layer */
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        .hud-container { position: absolute; top: 20px; left: 20px; color: white; }
+        .collection-title { font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: #aaa; margin-bottom: 5px; }
+        .main-header { font-family: serif; font-style: italic; font-size: 32px; margin: 0; color: #fff; text-shadow: 0 0 10px rgba(255, 105, 180, 0.8); }
+        
+        /* Legend */
+        .legend { margin-top: 15px; display: flex; flex-direction: column; gap: 8px; }
+        .legend-item { display: flex; align-items: center; opacity: 0.4; transition: opacity 0.3s; font-size: 12px; }
+        .legend-item.active { opacity: 1; color: #FF69B4; font-weight: bold; text-shadow: 0 0 8px #FF69B4; }
+        .icon { width: 20px; text-align: center; margin-right: 5px; }
+
+        /* Slogan */
+        .slogan { position: absolute; bottom: 20px; width: 100%; text-align: center; font-size: 10px; color: rgba(255,255,255,0.7); letter-spacing: 1px; }
+
+        /* Webcam (Hidden/Debug) */
+        #webcam-feed { position: absolute; bottom: 0; left: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+        #webgl-canvas { display: block; width: 100vw; height: 100vh; }
+        
+        /* Loading Overlay */
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #FF69B4; font-size: 14px; z-index: 20; text-align: center; }
+    </style>
+    
+    <!-- 引入 Three.js 和 MediaPipe 的 Import Map (关键：告诉浏览器去哪里下载库) -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/+esm"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div id="loading">LOADING VISION ENGINE...<br>(Please allow camera access)</div>
+
+    <div id="ui-layer">
+        <div class="hud-container">
+            <div class="collection-title">The Pink Collection</div>
+            <h1 class="main-header">Iconic Fantasy</h1>
+            <div class="legend">
+                <div class="legend-item" id="leg-tree"><span class="icon">🔴</span> FIST: Tree</div>
+                <div class="legend-item" id="leg-scatter"><span class="icon">✋</span> PALM: Scatter</div>
+                <div class="legend-item" id="leg-focus"><span class="icon">👌</span> PINCH: Focus</div>
+            </div>
+        </div>
+        <div class="slogan">A DREAM IN CHROME AND SILK</div>
+    </div>
+    
+    <video id="webcam-feed" playsinline autoplay muted></video>
+    <canvas id="webgl-canvas"></canvas>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { FilesetResolver, GestureRecognizer } from '@mediapipe/tasks-vision';
+
+        // --- Config (手机性能优化版) ---
+        const CONFIG = {
+            colors: { pink: 0xFF69B4, silver: 0xE0E0E0, black: 0x050505 },
+            count: 200, // 手机上减少粒子数量以防卡顿
+            lerpSpeed: 0.05
+        };
+
+        let currentState = 'SCATTER';
+        let objects = [];
+        let lastVideoTime = -1;
+        let gestureRecognizer = null;
+        let runningMode = "VIDEO";
+
+        // --- 1. Scene Setup ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(CONFIG.colors.black);
+        scene.fog = new THREE.FogExp2(CONFIG.colors.black, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 25;
+
+        const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('webgl-canvas'), antialias: false }); // 手机关闭抗锯齿提升性能
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+
+        // Lights
+        const ambientLight = new THREE.AmbientLight(0x404040);
+        scene.add(ambientLight);
+        const pointLight = new THREE.PointLight(CONFIG.colors.pink, 2, 80);
+        pointLight.position.set(0, 10, 10);
+        scene.add(pointLight);
+        const blueLight = new THREE.PointLight(0x00ffff, 1, 80);
+        blueLight.position.set(-10, -10, -10);
+        scene.add(blueLight);
+
+        // Materials
+        const chromeMaterial = new THREE.MeshStandardMaterial({
+            color: CONFIG.colors.silver, roughness: 0.2, metalness: 1.0
+        });
+        const silkMaterial = new THREE.MeshStandardMaterial({
+            color: CONFIG.colors.pink, roughness: 0.6, metalness: 0.4
+        });
+
+        // Post Processing
+        const composer = new EffectComposer(renderer);
+        composer.addPass(new RenderPass(scene, camera));
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        bloomPass.threshold = 0.1;
+        bloomPass.strength = 1.0; 
+        bloomPass.radius = 0.5;
+        composer.addPass(bloomPass);
+
+        // --- 2. Create Objects ---
+        const geoSphere = new THREE.SphereGeometry(0.4, 16, 16);
+        const geoBox = new THREE.BoxGeometry(0.6, 0.6, 0.6);
+
+        for(let i=0; i<CONFIG.count; i++) {
+            const isSphere = Math.random() > 0.5;
+            const mat = Math.random() > 0.5 ? chromeMaterial : silkMaterial;
+            const mesh = new THREE.Mesh(isSphere ? geoSphere : geoBox, mat);
+            
+            mesh.position.set((Math.random()-0.5)*30, (Math.random()-0.5)*30, (Math.random()-0.5)*30);
+            
+            const objData = {
+                mesh: mesh,
+                targetPosition: mesh.position.clone(),
+                targetRotation: new THREE.Euler(),
+                floatOffset: Math.random() * 100
+            };
+            scene.add(mesh);
+            objects.push(objData);
+        }
+
+        // --- 3. Morphing Logic ---
+        function calculateTargets(state) {
+            if (state === 'TREE') {
+                objects.forEach((obj, i) => {
+                    const t = i / objects.length;
+                    const angle = t * Math.PI * 15;
+                    const radius = (1 - t) * 8;
+                    const y = (t * 16) - 8;
+                    obj.targetPosition.set(Math.cos(angle)*radius, y, Math.sin(angle)*radius);
+                });
+            } else if (state === 'SCATTER') {
+                objects.forEach((obj) => {
+                    obj.targetPosition.set((Math.random()-0.5)*35, (Math.random()-0.5)*35, (Math.random()-0.5)*20);
+                });
+            } else if (state === 'FOCUS') {
+                 objects.forEach((obj, i) => {
+                    const angle = (i / objects.length) * Math.PI * 2;
+                    obj.targetPosition.set(Math.cos(angle)*10, Math.sin(angle*3)*2, Math.sin(angle)*10 - 5);
+                });
+            }
+        }
+
+        // --- 4. Animation ---
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = clock.getElapsedTime();
+
+            objects.forEach(obj => {
+                obj.mesh.position.lerp(obj.targetPosition, CONFIG.lerpSpeed);
+                obj.mesh.position.y += Math.sin(time * 2 + obj.floatOffset) * 0.005;
+                obj.mesh.rotation.x += 0.01;
+                obj.mesh.rotation.y += 0.01;
+            });
+
+            if(currentState !== 'FOCUS') {
+                camera.position.x = Math.sin(time * 0.2) * 20;
+                camera.position.z = Math.cos(time * 0.2) * 20;
+                camera.lookAt(0,0,0);
+            } else {
+                camera.position.lerp(new THREE.Vector3(0, 0, 15), 0.05);
+                camera.lookAt(0,0,0);
+            }
+
+            composer.render();
+            
+            // Vision Loop
+            if (gestureRecognizer && video.currentTime !== lastVideoTime) {
+                lastVideoTime = video.currentTime;
+                const results = gestureRecognizer.recognizeForVideo(video, Date.now());
+                if(results.gestures.length > 0) {
+                    const name = results.gestures[0][0].categoryName;
+                    handleGesture(name);
+                }
+            }
+        }
+
+        function handleGesture(name) {
+            let next = currentState;
+            document.querySelectorAll('.legend-item').forEach(e => e.classList.remove('active'));
+            
+            if(name === 'Closed_Fist') { next = 'TREE'; document.getElementById('leg-tree').classList.add('active'); }
+            if(name === 'Open_Palm') { next = 'SCATTER'; document.getElementById('leg-scatter').classList.add('active'); }
+            if(name === 'Victory' || name === 'Thumb_Up') { next = 'FOCUS'; document.getElementById('leg-focus').classList.add('active'); } // 用简单手势代替Pinch
+
+            if(next !== currentState) {
+                currentState = next;
+                calculateTargets(currentState);
+            }
+        }
+
+        // --- 5. Init Vision ---
+        const video = document.getElementById('webcam-feed');
+        async function setupVision() {
+            const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm");
+            gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
+                    delegate: "GPU"
+                },
+                runningMode: "VIDEO"
+            });
+            
+            // Start Camera
+            navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } }).then((stream) => {
+                video.srcObject = stream;
+                document.getElementById('loading').style.display = 'none';
+                calculateTargets('SCATTER');
+                animate();
+            }).catch(err => {
+                document.getElementById('loading').innerText = "CAMERA ACCESS DENIED";
+            });
+        }
+
+        setupVision();
+        
+        // Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
